@@ -1,0 +1,146 @@
+name: process-balancer-main
+
+
+on:
+  pull_request:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+.[0-9a-z]+
+      - v[0-9]+.[0-9]+.[0-9]+
+
+
+jobs:
+
+  tests:
+    name: Tests
+    runs-on: [self-hosted, ubuntu-t3.medium]
+    container:
+      image: public.ecr.aws/q0j1f2t0/ruby:2.5-bionic
+      options: --user 1000
+      env:
+        BUNDLE_PATH: vendor/bundle
+        BUNDLE_VERSION: 1.17.3
+        BUNDLE_JOBS: 4
+        BUNDLE_RETRY: 3
+        RUBYOPT: '-KU -E utf-8:utf-8'
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v2
+
+      - name: Install Bundler
+        shell: bash
+        run: |
+          gem install bundler --version=$BUNDLE_VERSION --no-document
+
+      - uses: actions/cache@v2
+        with:
+          path: |
+            vendor/bundle
+            Gemfile.lock
+          key: process-balancer-bundle-${{ hashFiles('Gemfile.lock') }}
+          restore-keys: |
+            process-balancer-bundle-${{ hashFiles('Gemfile.lock') }}
+            process-balancer-bundle-
+
+      - name: 'Bundler install'
+        shell: bash
+        run: |
+          bundle _${BUNDLE_VERSION}_ check || bundle _${BUNDLE_VERSION}_ install --retry=$BUNDLE_RETRY
+
+      - uses: actions/cache@v2
+        with:
+          path: $HOME/.cache/rubocop_cache
+          key: process-balancer-rubocop-${{ hashFiles('.rubocop.yml') }}
+          restore-keys: |
+            process-balancer-rubocop-${{ hashFiles('.rubocop.yml') }}
+            process-balancer-rubocop-
+
+      - name: Rubocop
+        shell: bash
+        run: |
+          bundle _${BUNDLE_VERSION}_ exec rubocop \
+            --parallel \
+            --format progress
+
+      - name: RSpec
+        shell: bash
+        run: |
+          bundle _${BUNDLE_VERSION}_ exec rspec
+
+      - name: Build Gem
+        shell: bash
+        run: |
+          gem build *.gemspec
+
+
+  publish:
+    name: Publish
+    if: |
+      github.event_name == 'push' && contains(github.ref, 'refs/tags/v')
+    needs: [ tests ]
+    runs-on: [self-hosted, ubuntu-t3.medium]
+    container:
+      image: public.ecr.aws/q0j1f2t0/ruby:2.5-bionic
+      options: --user 1000
+      env:
+        BUNDLE_PATH: vendor/bundle
+        BUNDLE_VERSION: 1.17.3
+        BUNDLE_JOBS: 4
+        BUNDLE_RETRY: 3
+        RUBYOPT: '-KU -E utf-8:utf-8'
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install Bundler
+        shell: bash
+        run: |
+          gem install bundler --version=$BUNDLE_VERSION --no-document
+
+      - name: Get Tag Name
+        id: tag_name
+        shell: bash
+        run: |
+          echo ::set-output name=SOURCE_TAG::${GITHUB_REF#refs/tags/}
+
+      - name: Tag Name Validation
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ steps.tag_name.outputs.SOURCE_TAG }}
+        run: |
+          [ -z "$SOURCE_TAG" ] && { echo "Tag is empty"; exit 1;}
+          echo "We are on tag: [ ${SOURCE_TAG} ]"
+
+      - name: VERSION Validation
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ steps.tag_name.outputs.SOURCE_TAG }}
+        run: |
+          version=$(grep VERSION lib/netsoft/rubocop/version.rb | sed -e "s/.*'\([^']*\)'.*/\1/")
+          [[ "v$version" == "$SOURCE_TAG" ]] && { echo "VERSION $version matches $SOURCE_TAG"; exit 0; }
+          [[ "v$version" != "$SOURCE_TAG" ]] && { echo "VERSION $version does not match $SOURCE_TAG"; exit 2; }
+
+      - uses: actions/cache@v2
+        with:
+          path: |
+            vendor/bundle
+            Gemfile.lock
+          key: process-balancer-bundle-${{ hashFiles('Gemfile.lock') }}
+          restore-keys: |
+            process-balancer-bundle-${{ hashFiles('Gemfile.lock') }}
+            process-balancer-bundle-
+
+      - name: 'Bundler install'
+        shell: bash
+        run: |
+          bundle _${BUNDLE_VERSION}_ check || bundle _${BUNDLE_VERSION}_ install --retry=$BUNDLE_RETRY
+
+      - name: Release Gem
+        shell: bash
+        env:
+          RUBYGEMS_API_KEY: ${{secrets.RUBYGEMS_API_KEY}}
+        run: |
+          ./bin/setup-rubygems.sh
+          rm -rf pkg
+          bundle exec rake release
