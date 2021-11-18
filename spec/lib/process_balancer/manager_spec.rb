@@ -331,7 +331,7 @@ RSpec.describe ProcessBalancer::Manager do
           before do
             allow(redis).to receive(:exists).and_wrap_original do |m, *args|
               value = m.call(*args)
-              value > 0
+              value.is_a?(Integer) ? value > 0 : value
             end
           end
 
